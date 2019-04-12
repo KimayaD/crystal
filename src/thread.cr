@@ -21,6 +21,10 @@ class Thread
   # :nodoc:
   property previous : Thread?
 
+  def self.unsafe_each
+    @@threads.unsafe_each { |thread| yield thread }
+  end
+
   # Starts a new system thread.
   def initialize(&@func : ->)
     @th = uninitialized LibC::PthreadT
@@ -42,7 +46,7 @@ class Thread
   def initialize
     @func = ->{}
     @th = LibC.pthread_self
-    @main_fiber = Fiber.new(stack_address)
+    @main_fiber = Fiber.new(stack_address, self)
 
     @@threads.push(self)
   end
@@ -124,7 +128,7 @@ class Thread
 
   protected def start
     Thread.current = self
-    @main_fiber = fiber = Fiber.new(stack_address)
+    @main_fiber = fiber = Fiber.new(stack_address, self)
 
     begin
       @func.call
@@ -176,5 +180,10 @@ class Thread
     {% end %}
 
     address
+  end
+
+  # :nodoc:
+  def to_unsafe
+    @th
   end
 end

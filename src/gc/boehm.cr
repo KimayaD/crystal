@@ -5,7 +5,7 @@
 {% if flag?(:freebsd) %}
   @[Link("gc-threaded")]
 {% else %}
-  @[Link("gc")]
+  @[Link("gc", static: true)]
 {% end %}
 
 lib LibGC
@@ -48,6 +48,13 @@ lib LibGC
 
   $stackbottom = GC_stackbottom : Void*
 
+  {% if flag?(:preview_mt) %}
+    fun set_stackbottom = GC_set_stackbottom(LibC::PthreadT, Void*)
+    fun get_stackbottom = GC_get_stackbottom : Void*
+  {% else %}
+    $stackbottom = GC_stackbottom : Void*
+  {% end %}
+
   fun set_on_collection_event = GC_set_on_collection_event(cb : ->)
 
   $gc_no = GC_gc_no : LibC::ULong
@@ -86,6 +93,10 @@ module GC
       LibGC.set_handle_fork(1)
     {% end %}
     LibGC.init
+
+    LibGC.set_start_callback ->do
+      GC.lock_write
+    end
   end
 
   def self.collect
@@ -173,13 +184,43 @@ module GC
   {% end %}
 
   # :nodoc:
-  def self.stack_bottom
-    LibGC.stackbottom
+  def self.current_thread_stack_bottom
+    {% if flag?(:preview_mt) %}
+      LibGC.get_stackbottom
+    {% else %}
+      LibGC.stackbottom
+    {% end %}
   end
 
   # :nodoc:
-  def self.stack_bottom=(pointer : Void*)
-    LibGC.stackbottom = pointer
+  def self.set_stackbottom(thread : Thread, stack_bottom : Void*)
+    {% if flag?(:preview_mt) %}
+      LibGC.set_stackbottom(thread.to_unsafe, stack_bottom)
+    {% else %}
+      LibGC.stackbottom = stack_bottom
+    {% end %}
+  end
+
+  # :nodoc:
+  def self.lock_read
+    {% if flag?(:preview_mt) %}
+      GC.disable
+    {% end %}
+  end
+
+  # :nodoc:
+  def self.unlock_read
+    {% if flag?(:preview_mt) %}
+      GC.enable
+    {% end %}
+  end
+
+  # :nodoc:
+  def self.lock_write
+  end
+
+  # :nodoc:
+  def self.unlock_write
   end
 
   # :nodoc:
@@ -189,12 +230,28 @@ module GC
 
   # :nodoc:
   def self.before_collect(&block)
-    @@prev_push_other_roots = LibGC.get_push_other_roots
     @@curr_push_other_roots = block
+    @@prev_push_other_roots = LibGC.get_push_other_roots
 
     LibGC.set_push_other_roots ->do
-      @@prev_push_other_roots.try(&.call)
       @@curr_push_other_roots.try(&.call)
+      @@prev_push_other_roots.try(&.call)
     end
+  end
+
+  # pushes the stack of pending fibers when the GC wants to collect memory:
+  GC.before_collect do
+    Fiber.unsafe_each do |fiber|
+      fiber.push_gc_roots unless fiber.running?
+    end
+
+    {% if flag?(:preview_mt) %}
+      Thread.unsafe_each do |thread|
+        fiber = thread.scheduler.@current
+        GC.set_stackbottom(thread, fiber.@stack_bottom)
+      end
+    {% end %}
+
+    GC.unlock_write
   end
 end
